@@ -1,7 +1,0 @@
-feat: Add AI improvements, accessibility, tests and stunning README
-
-- Added pytest test suite for backend API coverage
-- Enhanced ARIA labels across all React components
-- Cached OpenAI client singleton for efficiency
-- Beautiful README with Mermaid diagrams and badges
-- Deployed to Google Cloud Run asia-south1
