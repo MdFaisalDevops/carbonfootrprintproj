@@ -5,14 +5,17 @@ badges management, and the Master AI Coach prompt system.
 """
 
 import os
-from typing import Dict, List, Optional
+from typing import List, Optional, Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from openai import OpenAI
 import uvicorn
 import json
+
+_openai_client_cached: Optional[OpenAI] = None
 
 # Setup FastAPI App
 app = FastAPI(
@@ -55,11 +58,12 @@ async def serve_frontend():
 # DATA MODELS
 # -------------------------------------------------------------
 class LifestyleData(BaseModel):
-    transport_habits: str  # e.g., car_single, car_pool, metro, ev, cycle
-    diet_pattern: str      # e.g., meat_heavy, meat_moderate, vegetarian, vegan
-    electricity_usage: str # e.g., high, medium, low, solar
-    waste_generation: str  # e.g., none, basic, compost
-    shopping_frequency: Optional[str] = "medium"
+    transport_habits: Literal["car_single", "car_pool", "metro", "ev", "cycle"]
+    diet_pattern: Literal["meat_heavy", "meat_moderate", "vegetarian", "vegan"]
+    electricity_usage: Literal["high", "medium", "low", "solar"]
+    waste_generation: Literal["none", "basic", "compost"]
+    shopping_frequency: Optional[Literal["high", "medium", "low", "minimal"]] = "medium"
+
 
 class CoachQuery(BaseModel):
     user_id: str
@@ -288,8 +292,7 @@ async def ask_ai_coach(query: CoachQuery):
     if openai_key:
         try:
             global _openai_client_cached
-            if '_openai_client_cached' not in globals() or _openai_client_cached is None:
-                from openai import OpenAI
+            if _openai_client_cached is None:
                 _openai_client_cached = OpenAI(api_key=openai_key)
             
             response = _openai_client_cached.chat.completions.create(

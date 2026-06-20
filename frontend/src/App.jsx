@@ -1,186 +1,231 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import PropTypes from 'prop-types';
 import Navbar from './components/Navbar';
 import Dashboard from './components/Dashboard';
 import Breakdown from './components/Breakdown';
 import AICoach from './components/AICoach';
 import Gamification from './components/Gamification';
-import { Sparkles, Flame } from 'lucide-react';
+import ErrorBoundary from './components/ErrorBoundary';
+import { Sparkles, Flame, Target } from 'lucide-react';
 import confetti from 'canvas-confetti';
+import {
+  EMISSION_FACTORS,
+  computeDailyFootprint,
+  computeScore,
+  getLevelFromScore,
+  BASELINE_DAILY_KG,
+} from './constants';
 
-// Base factors matching backend logic
-const EMISSION_FACTORS = {
-  transport: { car_single: 12.0, car_pool: 6.0, metro: 1.5, ev: 0.8, cycle: 0.0 },
-  diet: { meat_heavy: 8.0, meat_moderate: 4.5, vegetarian: 2.0, vegan: 0.8 },
-  energy: { high: 9.0, medium: 5.0, low: 2.0, solar: 0.2 },
-  waste: { none: 3.0, basic: 1.0, compost: 0.2 }
+/** Default habit profile for a new user session */
+const DEFAULT_HABITS = {
+  transport: 'car_single',
+  diet:      'meat_heavy',
+  energy:    'high',
+  waste:     'none',
+  shopping:  'medium',
 };
 
 export default function App() {
-  const [activeScreen, setActiveScreen] = useState('dashboard');
-  const [habits, setHabits] = useState({
-    transport: 'car_single',
-    diet: 'meat_heavy',
-    energy: 'high',
-    waste: 'none'
-  });
-  
-  const [userScore, setUserScore] = useState(550);
+  const [activeScreen, setActiveScreen]   = useState('dashboard');
+  const [habits,       setHabits]         = useState(DEFAULT_HABITS);
+  const [userScore,    setUserScore]       = useState(550);
   const [dailyFootprint, setDailyFootprint] = useState(14.2);
-  const [weeklySaved, setWeeklySaved] = useState(48.2);
-  const [userLevel, setUserLevel] = useState('Eco Beginner');
-  const [streakDays, setStreakDays] = useState(12);
+  const [weeklySaved,  setWeeklySaved]    = useState(48.2);
+  const [userLevel,    setUserLevel]      = useState('Eco Beginner');
+  const [streakDays,   setStreakDays]     = useState(12);
+  /** Monthly CO₂ reduction goal in kg (set by user in Gamification) */
+  const [monthlyGoalKg, setMonthlyGoalKg] = useState(100);
+  /** Notification message for screen-reader live region */
+  const [liveMsg, setLiveMsg] = useState('');
 
-  // Sync state to API (if backend is active)
-  const syncWithBackend = async (scoreVal, levelVal, savedVal) => {
+  // ---------------------------------------------------------------------------
+  // Sync user data to backend (graceful — silently ignores offline errors)
+  // ---------------------------------------------------------------------------
+  const syncWithBackend = useCallback(async (scoreVal, levelVal, savedVal) => {
     try {
-      await fetch('http://localhost:10000/user/sync', {
-        method: 'POST',
+      const response = await fetch('http://localhost:10000/user/sync', {
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          user_id: 'user_self',
-          carbon_score: scoreVal,
-          level: levelVal,
-          badges: [], // will calculate on server or submit
+          user_id:        'user_self',
+          carbon_score:   scoreVal,
+          level:          levelVal,
+          badges:         [],
           weekly_co2_saved: savedVal,
-          streak_days: streakDays
-        })
+          streak_days:    streakDays,
+        }),
       });
-    } catch (e) {
-      // Local deployment is off or unreachable, bypass silently
+      if (!response.ok) {
+        console.warn('[App] Backend sync returned', response.status);
+      }
+    } catch {
+      // Backend is offline — local-only mode, no action needed
     }
-  };
+  }, [streakDays]);
 
-  // Run scoring calculations on habits modify
+  // ---------------------------------------------------------------------------
+  // Recalculate score & footprint whenever habits change
+  // ---------------------------------------------------------------------------
   useEffect(() => {
-    const transportVal = EMISSION_FACTORS.transport[habits.transport];
-    const dietVal = EMISSION_FACTORS.diet[habits.diet];
-    const energyVal = EMISSION_FACTORS.energy[habits.energy];
-    const wasteVal = EMISSION_FACTORS.waste[habits.waste];
-
-    const footprint = transportVal + dietVal + energyVal + wasteVal;
+    const footprint = computeDailyFootprint(habits);
     setDailyFootprint(footprint);
 
-    let calculatedScore = Math.round(1000 - (footprint * 20));
-    calculatedScore = Math.max(0, Math.min(1000, calculatedScore));
+    const newScore  = computeScore(footprint);
+    const newLevel  = getLevelFromScore(newScore);
 
-    // Handle confetti and toast notifications if score improved
-    if (calculatedScore > userScore) {
-      confetti({
-        particleCount: 100,
-        spread: 70,
-        origin: { y: 0.9 },
-        colors: ['#00f59b', '#10b981', '#ffffff']
-      });
-    }
+    setUserScore(prevScore => {
+      // Celebrate score improvements with confetti
+      if (newScore > prevScore) {
+        confetti({
+          particleCount: 100,
+          spread:        70,
+          origin:        { y: 0.9 },
+          colors:        ['#00f59b', '#10b981', '#ffffff'],
+        });
+        setLiveMsg(`Great progress! Your score improved to ${newScore}.`);
+      } else if (newScore < prevScore) {
+        setLiveMsg(`Score updated to ${newScore}. Consider switching to a greener option.`);
+      }
+      return newScore;
+    });
 
-    setUserScore(calculatedScore);
+    setUserLevel(newLevel);
 
-    // Calculate Standing Levels
-    let standing = 'Eco Beginner';
-    if (calculatedScore <= 300) standing = 'High Impact User';
-    else if (calculatedScore <= 600) standing = 'Eco Beginner';
-    else if (calculatedScore <= 750) standing = 'Conscious User';
-    else if (calculatedScore <= 900) standing = 'Balanced User';
-    else standing = 'Green Optimizer';
+    // Weekly savings vs Indian urban baseline
+    const baselineWeekly = BASELINE_DAILY_KG * 7;
+    const currentWeekly  = footprint * 7;
+    const saved = parseFloat(Math.max(0, baselineWeekly - currentWeekly).toFixed(1));
+    setWeeklySaved(saved);
 
-    setUserLevel(standing);
+    syncWithBackend(newScore, newLevel, saved);
+  }, [habits, syncWithBackend]);
 
-    // Calculate weekly savings compared to baseline (32 kg CO2)
-    const baselineWeekly = 32.0 * 7;
-    const currentWeekly = footprint * 7;
-    const saved = Math.max(0, baselineWeekly - currentWeekly);
-    const parsedSaved = parseFloat(saved.toFixed(1));
-    setWeeklySaved(parsedSaved);
+  const handleHabitChange = useCallback((category, value) => {
+    setHabits(prev => ({ ...prev, [category]: value }));
+  }, []);
 
-    // Run backend sync
-    syncWithBackend(calculatedScore, standing, parsedSaved);
-
-  }, [habits]);
-
-  const handleHabitChange = (category, value) => {
-    setHabits(prev => ({
-      ...prev,
-      [category]: value
-    }));
-  };
+  // Monthly progress = weekly saved × 4.33 weeks
+  const monthlyProjectedSaved = parseFloat((weeklySaved * 4.33).toFixed(1));
 
   return (
     <div className="app-container">
-      {/* Background Orbs */}
-      <div className="glow-orb glow-1"></div>
-      <div className="glow-orb glow-2"></div>
+      {/* Background ambient orbs */}
+      <div className="glow-orb glow-1" aria-hidden="true" />
+      <div className="glow-orb glow-2" aria-hidden="true" />
 
-      <Navbar 
-        activeScreen={activeScreen} 
-        setActiveScreen={setActiveScreen} 
-        userLevel={userLevel} 
+      {/* ARIA live region — announces score changes to screen readers */}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+      >
+        {liveMsg}
+      </div>
+
+      <Navbar
+        activeScreen={activeScreen}
+        setActiveScreen={setActiveScreen}
+        userLevel={userLevel}
       />
 
-      <main className="main-viewport">
-        {/* Dynamic header details */}
+      <main className="main-viewport" id="main-content" tabIndex={-1}>
+        {/* Top bar header */}
         <header className="top-bar">
           <div className="screen-title-area">
             <h1 className="screen-title" style={{ textTransform: 'capitalize' }}>
               {activeScreen === 'gamification' ? 'Eco Level' : activeScreen}
             </h1>
             <p className="screen-subtitle">
-              {activeScreen === 'dashboard' && 'Your real-time carbon intelligence overview.'}
-              {activeScreen === 'breakdown' && 'In-depth assessment of emission contributors.'}
-              {activeScreen === 'coach' && 'Personalized mitigation strategy session.'}
-              {activeScreen === 'gamification' && 'Compete, earn badges, and build positive streaks.'}
+              {activeScreen === 'dashboard'     && 'Your real-time carbon intelligence overview.'}
+              {activeScreen === 'breakdown'     && 'In-depth assessment of emission contributors.'}
+              {activeScreen === 'coach'         && 'Personalized mitigation strategy session.'}
+              {activeScreen === 'gamification'  && 'Compete, earn badges, and build positive streaks.'}
             </p>
           </div>
 
-          <div className="header-widgets">
-            <div className="widget-chip green-glow" title="Saved compared to baseline this week">
-              <Sparkles size={16} />
+          <div className="header-widgets" role="complementary" aria-label="Key metrics">
+            <div
+              className="widget-chip green-glow"
+              title={`Saved ${weeklySaved} kg CO₂ this week compared to urban baseline`}
+              aria-label={`Saved ${weeklySaved} kilograms CO₂ this week`}
+            >
+              <Sparkles size={16} aria-hidden="true" />
               <span>Saved <strong>{weeklySaved}</strong> kg CO₂</span>
             </div>
 
-            <div className="widget-chip streak-chip" title="Active Daily Streak">
-              <Flame size={16} className="streak-icon" />
+            <div
+              className="widget-chip streak-chip"
+              title={`Active daily streak: ${streakDays} days`}
+              aria-label={`${streakDays} day streak active`}
+            >
+              <Flame size={16} className="streak-icon" aria-hidden="true" />
               <span><strong>{streakDays}</strong> Day Streak</span>
+            </div>
+
+            <div
+              className="widget-chip goal-chip"
+              title={`Monthly goal: ${monthlyGoalKg} kg CO₂ reduction`}
+              aria-label={`Monthly goal: ${monthlyProjectedSaved} of ${monthlyGoalKg} kg CO₂ target`}
+            >
+              <Target size={16} aria-hidden="true" />
+              <span>
+                <strong>{Math.min(monthlyProjectedSaved, monthlyGoalKg)}</strong> / {monthlyGoalKg} kg goal
+              </span>
             </div>
           </div>
         </header>
 
-        {/* Content View Switching */}
+        {/* Screen content */}
         <div className="screens-container">
           {activeScreen === 'dashboard' && (
-            <Dashboard 
-              habits={habits} 
-              onHabitChange={handleHabitChange}
-              score={userScore}
-              dailyFootprint={dailyFootprint}
-              level={userLevel}
-              weeklySaved={weeklySaved}
-              setActiveScreen={setActiveScreen}
-            />
+            <ErrorBoundary screenName="Dashboard">
+              <Dashboard
+                habits={habits}
+                onHabitChange={handleHabitChange}
+                score={userScore}
+                dailyFootprint={dailyFootprint}
+                level={userLevel}
+                weeklySaved={weeklySaved}
+                setActiveScreen={setActiveScreen}
+              />
+            </ErrorBoundary>
           )}
 
           {activeScreen === 'breakdown' && (
-            <Breakdown 
-              habits={habits}
-              dailyFootprint={dailyFootprint}
-            />
+            <ErrorBoundary screenName="Breakdown">
+              <Breakdown
+                habits={habits}
+                dailyFootprint={dailyFootprint}
+                monthlyGoalKg={monthlyGoalKg}
+                monthlyProjectedSaved={monthlyProjectedSaved}
+              />
+            </ErrorBoundary>
           )}
 
           {activeScreen === 'coach' && (
-            <AICoach 
-              habits={habits}
-              personality={userLevel}
-              dailyFootprint={dailyFootprint}
-            />
+            <ErrorBoundary screenName="AI Coach">
+              <AICoach
+                habits={habits}
+                personality={userLevel}
+                dailyFootprint={dailyFootprint}
+              />
+            </ErrorBoundary>
           )}
 
           {activeScreen === 'gamification' && (
-            <Gamification 
-              score={userScore}
-              level={userLevel}
-              streakDays={streakDays}
-              weeklySaved={weeklySaved}
-              habits={habits}
-            />
+            <ErrorBoundary screenName="Eco Level">
+              <Gamification
+                score={userScore}
+                level={userLevel}
+                streakDays={streakDays}
+                weeklySaved={weeklySaved}
+                habits={habits}
+                monthlyGoalKg={monthlyGoalKg}
+                onGoalChange={setMonthlyGoalKg}
+                monthlyProjectedSaved={monthlyProjectedSaved}
+              />
+            </ErrorBoundary>
           )}
         </div>
       </main>

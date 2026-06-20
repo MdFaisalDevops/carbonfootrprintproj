@@ -112,3 +112,74 @@ def test_ask_ai_coach_offline_fallback():
     assert "micro_actions" in data
     assert "future_projection_30_days" in data
     assert "motivational_insight" in data
+
+def test_ask_ai_coach_invalid_input():
+    # Send incorrect habit options to check Literal constraints
+    payload = {
+        "user_id": "user_self",
+        "question": "Testing inputs",
+        "lifestyle": {
+            "transport_habits": "rocket_ship",  # Invalid transport
+            "diet_pattern": "vegetarian",
+            "electricity_usage": "low",
+            "waste_generation": "compost",
+            "shopping_frequency": "low"
+        }
+    }
+    response = client.post("/coach/ask", json=payload)
+    assert response.status_code == 422  # Pydantic Literal validation error
+
+def test_sync_user_data_invalid():
+    # Send invalid type for carbon_score to verify field types validation
+    payload = {
+        "user_id": "user_self",
+        "carbon_score": "should_be_int",  # Invalid type
+        "level": "Eco Beginner",
+        "badges": ["consistency"],
+        "weekly_co2_saved": 48.2,
+        "streak_days": 12
+    }
+    response = client.post("/user/sync", json=payload)
+    assert response.status_code == 422
+
+from unittest.mock import MagicMock, patch
+
+def test_ask_ai_coach_with_openai_mock():
+    # Mock OPENAI_API_KEY environment variable
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-fake-key-for-test"}):
+        # Create a mock client and completion response
+        mock_response = MagicMock()
+        mock_response.choices = [
+            MagicMock(
+                message=MagicMock(
+                    content='{"carbon_personality_type": "Balanced User", "total_footprint_estimate": "5.5 kg CO2/day", "impact_hotspots": ["energy"], "top_3_actions": [{"action": "Test action", "why_it_matters": "testing", "co2_saving_estimate": "1kg", "effort_level": "low"}], "micro_actions": ["micro1"], "future_projection_30_days": "looks good", "motivational_insight": "keep going"}'
+                )
+            )
+        ]
+        
+        # Patch the OpenAI client's completion creation method
+        with patch("app.OpenAI") as mock_openai_class:
+            mock_client = MagicMock()
+            mock_client.chat.completions.create.return_value = mock_response
+            mock_openai_class.return_value = mock_client
+            
+            # Reset cached client state to force instantiation
+            with patch("app._openai_client_cached", None):
+                payload = {
+                    "user_id": "user_self",
+                    "question": "How to optimize energy?",
+                    "lifestyle": {
+                        "transport_habits": "ev",
+                        "diet_pattern": "vegetarian",
+                        "electricity_usage": "low",
+                        "waste_generation": "compost",
+                        "shopping_frequency": "low"
+                    }
+                }
+                response = client.post("/coach/ask", json=payload)
+                assert response.status_code == 200
+                data = response.json()
+                assert data["carbon_personality_type"] == "Balanced User"
+                assert data["impact_hotspots"] == ["energy"]
+                assert data["top_3_actions"][0]["action"] == "Test action"
+
